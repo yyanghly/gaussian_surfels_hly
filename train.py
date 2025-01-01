@@ -72,9 +72,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
         if iteration - 1 == 0:
             scale = 4
-        elif iteration - 1 == 2000:
+        elif iteration - 1 == 2000 + 1:
             scale = 2
-        elif iteration - 1 >= 5000:
+        elif iteration - 1 == 5000 + 1:
             scale = 1
         # scale = 1
 
@@ -119,12 +119,16 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             loss_monoN = cos_loss(normal, monoN, weight=mask_gt)
             # loss_depth = l1_loss(depth * mask_match, monoD_match)
 
-        loss_surface = cos_loss(resize_image(normal, 1), resize_image(d2n, 1), thrsh=np.pi*1/10000 , weight=1)
+        loss_surface = cos_loss(normal, d2n)
         
-        opac_ = gaussians.get_opacity - 0.5
-        opac_mask = torch.gt(opac_, 0.01) * torch.le(opac_, 0.99)
-        loss_opac = torch.exp(-(opac_ * opac_) * 20)
-        loss_opac = (loss_opac * opac_mask).mean()
+
+        opac_ = gaussians.get_opacity
+        opac_mask0 = torch.gt(opac_, 0.01) * torch.le(opac_, 0.5)
+        opac_mask1 = torch.gt(opac_, 0.5) * torch.le(opac_, 0.99)
+        opac_mask = opac_mask0 * 0.01 + opac_mask1
+        loss_opac = (torch.exp(-(opac_ - 0.5)**2 * 20) * opac_mask).mean()
+        # loss_opac = bce_loss(opac_, torch.gt(opac_, 0.01) * torch.le(opac_, 0.99)) * 0.01
+
         
         curv_n = normal2curv(normal, mask_vis)
         # curv_d2n = normal2curv(d2n, mask_vis_2)
@@ -141,6 +145,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         if mono is not None:
             loss += (0.04 - ((iteration / opt.iterations)) * 0.02) * loss_monoN
             # loss += 0.01 * loss_depth
+        
 
         loss.backward()
 
@@ -170,9 +175,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 # Keep track of max radii in image-space for pruning
                 gaussians.max_radii2D[visibility_filter] = torch.max(gaussians.max_radii2D[visibility_filter], radii[visibility_filter])
                 gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter)
-                min_opac = 0.1# if iteration <= opt.densify_from_iter else 0.1
-                # min_opac = 0.05 if iteration <= opt.densify_from_iter else 0.005
-                # if iteration % opt.pruning_interval == 0:
+                min_opac = 0.1
                 if iteration % opt.densification_interval == 0:
                     gaussians.adaptive_prune(min_opac, scene.cameras_extent)
                     gaussians.adaptive_densify(opt.densify_grad_threshold, scene.cameras_extent)
@@ -183,15 +186,11 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
 
             if (iteration - 1) % 1000 == 0:
-
-                if mono is not None:
-                    monoN_wrt = normal2rgb(monoN, mask_gt)
-                    # monoD_wrt = depth2rgb(monoD_match, mask_match)
-
                 normal_wrt = normal2rgb(normal, mask_vis)
                 depth_wrt = depth2rgb(depth, mask_vis)
                 img_wrt = torch.cat([gt_image, image, normal_wrt * opac, depth_wrt * opac], 2)
                 save_image(img_wrt.cpu(), f'test/test.png')
+                
 
             
             if iteration < opt.iterations:
@@ -202,7 +201,6 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
             if (iteration in checkpoint_iterations):
                 # gaussians.adaptive_prune(min_opac, scene.cameras_extent)
-                # scene.visualize_cameras()
                 print("\n[ITER {}] Saving Checkpoint".format(iteration))
                 torch.save((gaussians.capture(), iteration), scene.model_path + "/chkpnt" + str(iteration) + ".pth")
 
