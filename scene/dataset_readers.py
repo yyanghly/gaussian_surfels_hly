@@ -1,20 +1,8 @@
-#
-# Copyright (C) 2023, Inria
-# GRAPHDECO research group, https://team.inria.fr/graphdeco
-# All rights reserved.
-#
-# This software is free for non-commercial, research and evaluation use 
-# under the terms of the LICENSE.md file.
-#
-# For inquiries contact  george.drettakis@inria.fr
-#
-
 import os
 import sys
 from PIL import Image
 from typing import NamedTuple
-from scene.colmap_loader import read_extrinsics_text, read_intrinsics_text, qvec2rotmat, \
-    read_extrinsics_binary, read_intrinsics_binary, read_points3D_binary, read_points3D_text
+from scene.colmap_loader import read_extrinsics_text, read_intrinsics_text, qvec2rotmat, read_points3D_binary
 from utils.graphics_utils import getWorld2View2, focal2fov, fov2focal
 import numpy as np
 import json
@@ -29,6 +17,7 @@ import imageio
 import skimage
 import cv2
 from scene.gaussian_model import BasicPointCloud
+import open3d as o3d
 
 class CameraInfo(NamedTuple):
     uid: int
@@ -75,7 +64,48 @@ def getNerfppNorm(cam_info):
 
     return {"translate": translate, "radius": radius}
 
-def readColmapCameras(cam_extrinsics, cam_intrinsics, images_folder):
+def fetchPly(path):
+    pcd = o3d.io.read_point_cloud(path)
+    pcd = pcd.voxel_down_sample(1.0 / 50.0) 
+    xyz = np.asarray(pcd.points)
+    rgb = np.asarray(pcd.colors)  # Set all points to white color (1.0, 1.0, 1.0)
+    
+
+    return BasicPointCloud(points=xyz, colors=rgb, normals=np.zeros((xyz.shape[0], 3)))
+
+# #o3d pcd
+# def fetchPly(path):
+#     pcd = o3d.io.read_point_cloud(path)
+#     pcd = pcd.random_down_sample(1.0 /5.0) 
+#     xyz = np.asarray(pcd.points)
+#     #rgb = np.asarray(pcd.colors)
+#     #rgb = np.empty((xyz.shape[0],3))
+
+#     # Set all points to white color
+#     rgb = np.ones((xyz.shape[0],3))
+#     #return BasicPointCloud(points=positions, colors=colors, normals=np.zeros((positions.shape[0], 3)))
+
+#     return BasicPointCloud(points=xyz, colors=rgb, normals=np.zeros((xyz.shape[0], 3)))
+
+#colmap pcd color
+# def fetchPly(path):
+#     plydata = PlyData.read(path)
+#     vertices = plydata['vertex']
+#     positions = np.vstack([vertices['x'], vertices['y'], vertices['z']]).T
+#     colors = np.vstack([vertices['red'], vertices['green'], vertices['blue']]).T / 255.0
+#     #normals = np.vstack([vertices['nx'], vertices['ny'], vertices['nz']]).T
+#     return BasicPointCloud(points=positions, colors=colors, normals=np.zeros((positions.shape[0], 3)))
+
+# #colmap pcd no color
+# def fetchPly(path):
+#     plydata = PlyData.read(path)
+#     vertices = plydata['vertex']
+#     positions = np.vstack([vertices['x'], vertices['y'], vertices['z']]).T
+#     #colors = np.vstack([vertices['red'], vertices['green'], vertices['blue']]).T / 255.0
+#     #normals = np.vstack([vertices['nx'], vertices['ny'], vertices['nz']]).T
+#     return BasicPointCloud(points=positions, colors=np.empty((positions.shape[0],3)), normals=np.zeros((positions.shape[0], 3)))
+
+def readColmapCameras(cam_extrinsics, cam_intrinsics, images_folder, normals_folder):
     cam_infos = []
     for idx, key in enumerate(cam_extrinsics):
         sys.stdout.write('\r')
@@ -83,8 +113,18 @@ def readColmapCameras(cam_extrinsics, cam_intrinsics, images_folder):
         sys.stdout.write("Reading camera {}/{}".format(idx+1, len(cam_extrinsics)))
         sys.stdout.flush()        
         
+
+        #extrinsic
         extr = cam_extrinsics[key]
-        intr = cam_intrinsics[extr.camera_id]
+        
+        #intrinsic
+        intr = cam_intrinsics[1]
+        #THIS MEAN USE intricsic index 1. In this case we only have 1 camera, a "PINHOLE"
+        #Camera(id=1, model='PINHOLE', width=640, height=480, params=array([535.4, 539.2]))
+        #height = intr.height
+        #width = intr.width
+        #fx = intr.params[0]
+        #fy = intr.params[1]
         height = intr.height
         width = intr.width        
         
@@ -96,7 +136,7 @@ def readColmapCameras(cam_extrinsics, cam_intrinsics, images_folder):
         uid = intr.id
         R = np.transpose(qvec2rotmat(extr.qvec))
         T = np.array(extr.tvec)
-
+        
         if intr.model=="SIMPLE_PINHOLE":
             focal_length_x = intr.params[0]
             FovY = focal2fov(focal_length_x, height)
@@ -108,6 +148,7 @@ def readColmapCameras(cam_extrinsics, cam_intrinsics, images_folder):
             FovY = focal2fov(focal_length_y, height)
             FovX = focal2fov(focal_length_x, width)
             prcppoint = np.array([intr.params[2] / width, intr.params[3] / height])
+
         elif intr.model=="SIMPLE_RADIAL":
             f, cx, cy, r = intr.params
             FovY = focal2fov(f, height)
@@ -121,18 +162,27 @@ def readColmapCameras(cam_extrinsics, cam_intrinsics, images_folder):
             image_undistorted = cv2.cvtColor(image_undistorted, cv2.COLOR_BGR2RGB)
             image = Image.fromarray(image_undistorted)
         else:
-            # print(intr.model, intr.params)
-            # exit()
             assert False, "Colmap camera model not handled: only undistorted datasets (PINHOLE or SIMPLE_PINHOLE cameras) supported!"
 
 
 
         try:
-            monoN = read_monoData(f'{images_folder}/../normal/{image_name}_normal.npy')
+            monoN_image = Image.open(f'{normals_folder}/{image_name}.png').convert('RGB')
+            if (monoN_image.size != image.size):
+                monoN_image = monoN_image.resize(image.size, Image.ANTIALIAS)
+            monoN = np.array(monoN_image)
+            monoN = np.transpose(monoN, (2, 0, 1))  # Convert to (3, W, H)
+            monoN = monoN / 255.0
+            # print("monoN array shape ", monoN_array.shape)
+            # print("monoN shape ", monoN.size)
+            # print("image shape ", image.size)
+            # print("monoN[0,0]", monoN_array[:, 0, 0])
+            # input()
             try:
                 monoD = read_monoData(f'{images_folder}/../depth/{image_name}_depth.npy')
             except FileNotFoundError:
                 monoD = np.zeros_like(monoN[:1])
+                
             mono = np.concatenate([monoN, monoD], 0)
         except FileNotFoundError:
             mono = None
@@ -145,18 +195,11 @@ def readColmapCameras(cam_extrinsics, cam_intrinsics, images_folder):
         cam_info = CameraInfo(uid=uid, R=R, T=T, FovY=FovY, FovX=FovX, prcppoint=prcppoint, image=image,
                               image_path=image_path, image_name=image_name, width=width, height=height, mask=mask, mono=mono)
         cam_infos.append(cam_info)
+    print("len(cam_infos): ", len(cam_infos))
     sys.stdout.write('\n')
     return cam_infos
 
-def fetchPly(path):
-    plydata = PlyData.read(path)
-    vertices = plydata['vertex']
-    positions = np.vstack([vertices['x'], vertices['y'], vertices['z']]).T
-    colors = np.vstack([vertices['red'], vertices['green'], vertices['blue']]).T / 255.0
-    normals = np.vstack([vertices['nx'], vertices['ny'], vertices['nz']]).T
-    return BasicPointCloud(points=positions, colors=colors, normals=normals)
-
-def storePly(path, xyz, rgb, normal=None):
+def storePly(path, xyz, rgb, normal):
     # Define the dtype for the structured array
     dtype = [('x', 'f4'), ('y', 'f4'), ('z', 'f4'),
             ('nx', 'f4'), ('ny', 'f4'), ('nz', 'f4'),
@@ -173,22 +216,29 @@ def storePly(path, xyz, rgb, normal=None):
     ply_data = PlyData([vertex_element])
     ply_data.write(path)
 
-def readColmapSceneInfo(path, images, eval, llffhold=8):
-    try:
-        cameras_extrinsic_file = os.path.join(path, "sparse/0", "images.bin")
-        cameras_intrinsic_file = os.path.join(path, "sparse/0", "cameras.bin")
-        cam_extrinsics = read_extrinsics_binary(cameras_extrinsic_file)
-        cam_intrinsics = read_intrinsics_binary(cameras_intrinsic_file)
-    except:
-        cameras_extrinsic_file = os.path.join(path, "sparse/0", "images.txt")
-        cameras_intrinsic_file = os.path.join(path, "sparse/0", "cameras.txt")
-        cam_extrinsics = read_extrinsics_text(cameras_extrinsic_file)
-        cam_intrinsics = read_intrinsics_text(cameras_intrinsic_file)
 
-    reading_dir = "images" if images == None else images
-    cam_infos_unsorted = readColmapCameras(cam_extrinsics=cam_extrinsics, cam_intrinsics=cam_intrinsics, images_folder=os.path.join(path, reading_dir))
+def readColmapSceneInfo(path, images, eval, llffhold=8):
+    cameras_extrinsic_file = os.path.join(path, "sparse/0", "images.txt") ##camera pose
+    cameras_intrinsic_file = os.path.join(path, "sparse/0", "cameras.txt") ##camera intrinsics
+    cam_extrinsics = read_extrinsics_text(cameras_extrinsic_file)
+    cam_intrinsics = read_intrinsics_text(cameras_intrinsic_file)
+
+    reading_dir = "images" #if images == None else images
+    reading_normal_dir = "normals" #if normals == None else normals
+    print("Reading images from: ", os.path.join(path, reading_dir))
+    ##Read Colmap Cameras
+    cam_infos_unsorted = readColmapCameras(
+        cam_extrinsics=cam_extrinsics, 
+        cam_intrinsics=cam_intrinsics, 
+        images_folder=os.path.join(path, reading_dir), 
+        normals_folder = os.path.join(path, reading_normal_dir)
+    )
+    
+    
+    
     cam_infos = sorted(cam_infos_unsorted.copy(), key = lambda x : x.image_name)
 
+   
     if eval:
         train_cam_infos = [c for idx, c in enumerate(cam_infos) if idx % llffhold != 0]
         test_cam_infos = [c for idx, c in enumerate(cam_infos) if idx % llffhold == 0]
@@ -200,14 +250,11 @@ def readColmapSceneInfo(path, images, eval, llffhold=8):
 
     ply_path = os.path.join(path, "sparse/0/points3D.ply")
     bin_path = os.path.join(path, "sparse/0/points3D.bin")
-    txt_path = os.path.join(path, "sparse/0/points3D.txt")
+    
     if not os.path.exists(ply_path):
         print("Converting point3d.bin to .ply, will happen only the first time you open the scene.")
-        try:
-            xyz, rgb, _ = read_points3D_binary(bin_path)
-        except:
-            xyz, rgb, _ = read_points3D_text(txt_path)
 
+        xyz, rgb, _ = read_points3D_binary(bin_path)
         storePly(ply_path, xyz, rgb)
     try:
         pcd = fetchPly(ply_path)
@@ -363,6 +410,7 @@ def read_monoData(path):
 
 def readIDRCameras(path):
     # copy from IDR: https://github.com/lioryariv/idr/
+    print("readIDRCameras")
 
     assert os.path.exists(path), "Data directory is empty"
 
@@ -417,6 +465,11 @@ def readIDRCameras(path):
 
         try:
             monoN = read_monoData(f'{path}/normal/{image_name}_normal.npy')
+            # print(image_name)
+            # print(image.size)
+            # print(monoN.shape)
+            # print(monoN)
+            # input()
             try:
                 monoD = read_monoData(f'{path}/depth/{image_name}_depth.npy')
             except FileNotFoundError:

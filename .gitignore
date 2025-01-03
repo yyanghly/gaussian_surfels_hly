@@ -16,4 +16,5 @@ submodules/diff_gaussian_rasterization/diff_gaussian_rasterization.egg-info
 submodules/diff_gaussian_rasterization/build
 submodules/diff_gaussian_rasterization/dist
 submodules/omnidata/pretrained_models
+submodules/omnidata/omnidata_starter_dataset
 

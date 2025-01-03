@@ -37,6 +37,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     tb_writer = prepare_output_and_logger(dataset)
     gaussians = GaussianModel(dataset)
     scene = Scene(dataset, gaussians, opt.camera_lr, shuffle=False, resolution_scales=[1, 2, 4])
+    print("Finish loading scene")
     use_mask = dataset.use_mask
     gaussians.training_setup(opt)
     if checkpoint:
@@ -60,6 +61,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
     first_iter += 1
     count = -1
+    print("Start training")
     for iteration in range(first_iter, opt.iterations + 2):
 
         iter_start.record()
